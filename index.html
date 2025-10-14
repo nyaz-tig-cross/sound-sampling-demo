@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>音声のデジタル化 体験（加工版）</title>
+<style>
+body {
+  font-family: "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+  background: #fafafa;
+  color: #222;
+  text-align: center;
+  margin: 28px;
+}
+h1 { color:#007acc; margin-bottom:4px; }
+p.lead { margin-top:0; color:#444; }
+
+#dropzone {
+  width: 88%;
+  max-width: 1000px;
+  margin: 18px auto;
+  padding: 36px;
+  border-radius: 12px;
+  border: 3px dashed #007acc;
+  background: #eaf5ff;
+  color: #005a9e;
+  transition: background-color .15s;
+}
+#dropzone.dragover { background:#cfeeff; }
+
+canvas {
+  width: 88%;
+  max-width: 1000px;
+  height: 160px;
+  background:#fff;
+  border-radius:8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  display:block;
+  margin: 16px auto;
+}
+
+.controls {
+  width: 88%;
+  max-width: 1000px;
+  margin: 8px auto 22px auto;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:12px;
+  flex-wrap:wrap;
+}
+
+.info {
+  width:100%;
+  text-align:center;
+  margin-top:6px;
+  color:#333;
+  font-size:16px;
+}
+
+button {
+  background:#007acc;
+  color:white;
+  border:none;
+  padding:8px 16px;
+  border-radius:8px;
+  cursor:pointer;
+  font-size:15px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+}
+button:disabled { opacity:0.5; cursor:default; }
+button.active { background:#005a9e; } /* 押下状態 */
+
+.slider-row {
+  width:88%;
+  max-width:1000px;
+  margin:10px auto;
+}
+
+.slider-label {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  margin-bottom:6px;
+  font-size: 1.5em;
+  color: #222;
+}
+
+.small-note { font-size:0.9em; color:#555; margin-top:6px; }
+
+input[type=range] {
+  width:100%;
+  height:28px;
+  background:transparent;
+}
+
+.ticks {
+  display:flex;
+  justify-content:space-between;
+  font-size:0.85em;
+  margin-top:6px;
+  color:#444;
+  user-select:none;
+}
+
+@media (max-width:600px){
+  .slider-label { font-size:1.15em; }
+}
+</style>
+</head>
+<body>
+<h1>音声のデジタル化 体験（加工版）</h1>
+<p class="lead">音声ファイル（mp3,wav等）を下の枠にドラッグ＆ドロップしてください。再生ボタンでオリジナル音声、加工して再生ボタンでサンプリング/量子化を適用して再生できます。</p>
+
+<div id="dropzone">ここに音声ファイルをドロップ</div>
+
+<canvas id="waveform"></canvas>
+
+<div class="info">
+  <div id="duration">再生時間：-- 秒</div>
+  <div style="margin-top:8px;">
+    <button id="playOriginalBtn" disabled>▶ 再生</button>
+    <button id="playProcessedBtn" disabled>▶ 加工して再生</button>
+    <button id="stopBtn" disabled>⏹ 停止</button>
+  </div>
+</div>
+
+<div class="slider-row">
+  <div class="slider-label">
+    <div>サンプリング周波数</div>
+    <div><span id="srValueLabel">44100</span> Hz</div>
+  </div>
+  <input id="srSlider" type="range" min="0" max="7" step="1" value="6">
+  <div class="ticks" id="srTicks"></div>
+</div>
+
+<div class="slider-row">
+  <div class="slider-label">
+    <div>量子化ビット数</div>
+    <div><span id="bitValueLabel">16</span> bit</div>
+  </div>
+  <input id="bitSlider" type="range" min="0" max="3" step="1" value="3">
+  <div class="ticks" id="bitTicks"></div>
+</div>
+
+<div class="small-note">※ 96000Hzはハイレゾをイメージしています。</div>
+
+<script>
+const srList = [4000,8000,12000,20000,24000,36000,44100,96000];
+const bitList = [4,8,12,16];
+
+let audioCtx=null;
+let originalBuffer=null;
+let processedBuffer=null;
+let sourceNode=null;
+let channelData=null;
+let origSampleRate=44100;
+
+/* UI */
+const dropzone = document.getElementById('dropzone');
+const canvas = document.getElementById('waveform');
+const ctx = canvas.getContext('2d');
+const durationEl = document.getElementById('duration');
+const playOriginalBtn = document.getElementById('playOriginalBtn');
+const playProcessedBtn = document.getElementById('playProcessedBtn');
+const stopBtn = document.getElementById('stopBtn');
+const srSlider = document.getElementById('srSlider');
+const srValueLabel = document.getElementById('srValueLabel');
+const srTicks = document.getElementById('srTicks');
+const bitSlider = document.getElementById('bitSlider');
+const bitValueLabel = document.getElementById('bitValueLabel');
+const bitTicks = document.getElementById('bitTicks');
+
+/* ticks表示 */
+srTicks.innerHTML = srList.map(v=>`<div>${v}</div>`).join('');
+bitTicks.innerHTML = bitList.map(v=>`<div>${v}</div>`).join('');
+srValueLabel.textContent = srList[srSlider.value];
+bitValueLabel.textContent = bitList[bitSlider.value];
+
+/* ドロップ */
+dropzone.addEventListener('dragover', e=>{ e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', e=>{ e.preventDefault(); dropzone.classList.remove('dragover'); });
+dropzone.addEventListener('drop', async e=>{
+  e.preventDefault(); dropzone.classList.remove('dragover');
+  const file=e.dataTransfer.files[0];
+  if(!file||!file.type.startsWith('audio/')){ alert('音声ファイルをドロップしてください。'); return; }
+  dropzone.textContent=`読み込み中: ${file.name}`;
+  try{
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const arrayBuffer = await file.arrayBuffer();
+    originalBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  }catch(err){
+    alert('音声の読み込みに失敗しました。'); dropzone.textContent='ここに音声ファイルをドロップ'; return;
+  }
+  dropzone.textContent=`読み込み完了: ${file.name}`;
+  channelData = originalBuffer.getChannelData(0);
+  origSampleRate = originalBuffer.sampleRate;
+  durationEl.textContent = `再生時間：${originalBuffer.duration.toFixed(2)} 秒`;
+  playOriginalBtn.disabled=false;
+  playProcessedBtn.disabled=false;
+  stopBtn.disabled=true;
+  drawWaveform(originalBuffer);
+});
+
+/* 波形描画 */
+function drawWaveform(buffer){
+  const pixelRatio = window.devicePixelRatio ||1;
+  const width=canvas.clientWidth, height=canvas.clientHeight;
+  canvas.width=Math.floor(width*pixelRatio);
+  canvas.height=Math.floor(height*pixelRatio);
+  ctx.scale(pixelRatio,pixelRatio);
+  const data=buffer.getChannelData(0);
+  const step=Math.ceil(data.length/width);
+  const midY=height/2;
+  ctx.clearRect(0,0,width,height);
+  ctx.fillStyle='#fff'; ctx.fillRect(0,0,width,height);
+  ctx.lineWidth=1; ctx.strokeStyle='#007acc'; ctx.beginPath();
+  for(let x=0;x<width;x++){
+    const start=x*step; let min=1,max=-1;
+    for(let i=0;i<step&&(start+i)<data.length;i++){
+      const v=data[start+i];
+      if(v<min)min=v; if(v>max) max=v;
+    }
+    const y1=midY+min*midY; const y2=midY+max*midY;
+    ctx.moveTo(x,y1); ctx.lineTo(x,y2);
+  }
+  ctx.stroke();
+}
+
+/* ボタン押下スタイル制御 */
+function setActiveButton(btn){
+  [playOriginalBtn,playProcessedBtn].forEach(b=>b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+}
+
+/* オリジナル再生 */
+function playOriginal(){
+  stopAudio();
+  if(!originalBuffer) return;
+  sourceNode = audioCtx.createBufferSource();
+  sourceNode.buffer = originalBuffer;
+  sourceNode.connect(audioCtx.destination);
+  sourceNode.start();
+  sourceNode.onended = ()=>{
+    sourceNode=null;
+    stopBtn.disabled=true;
+    playOriginalBtn.disabled=false;
+    playProcessedBtn.disabled=false;
+    setActiveButton(null);
+  };
+  playOriginalBtn.disabled=true;
+  stopBtn.disabled=false;
+  playProcessedBtn.disabled=false;
+  setActiveButton(playOriginalBtn);
+}
+
+/* 加工再生 */
+function playProcessed(){
+  stopAudio();
+  if(!originalBuffer) return;
+  const srTarget=srList[srSlider.value];
+  const bitDepth=bitList[bitSlider.value];
+  const len=Math.floor(channelData.length*srTarget/origSampleRate);
+  processedBuffer = audioCtx.createBuffer(1,len,srTarget);
+  const out = processedBuffer.getChannelData(0);
+  const step=Math.pow(2,bitDepth)/2-1;
+  for(let i=0;i<len;i++){
+    const idx=Math.floor(i*origSampleRate/srTarget);
+    let v=channelData[idx]||0;
+    out[i]=Math.round(v*step)/step;
+  }
+  sourceNode = audioCtx.createBufferSource();
+  sourceNode.buffer = processedBuffer;
+  sourceNode.connect(audioCtx.destination);
+  sourceNode.start();
+  sourceNode.onended = ()=>{
+    sourceNode=null;
+    stopBtn.disabled=true;
+    playOriginalBtn.disabled=false;
+    playProcessedBtn.disabled=false;
+    setActiveButton(null);
+  };
+  playProcessedBtn.disabled=true;
+  stopBtn.disabled=false;
+  playOriginalBtn.disabled=false;
+  setActiveButton(playProcessedBtn);
+}
+
+/* 停止 */
+function stopAudio(){
+  if(sourceNode){
+    try{ sourceNode.stop(); }catch(e){}
+    sourceNode.disconnect(); sourceNode=null;
+  }
+  stopBtn.disabled=true;
+  playOriginalBtn.disabled=false;
+  playProcessedBtn.disabled=false;
+  setActiveButton(null);
+}
+
+/* イベント */
+playOriginalBtn.addEventListener('click',playOriginal);
+playProcessedBtn.addEventListener('click',playProcessed);
+stopBtn.addEventListener('click',stopAudio);
+
+srSlider.addEventListener('input',()=>{ srValueLabel.textContent=srList[srSlider.value]; });
+bitSlider.addEventListener('input',()=>{ bitValueLabel.textContent=bitList[bitSlider.value]; });
+
+window.addEventListener('resize',()=>{ if(originalBuffer) drawWaveform(originalBuffer); });
+</script>
+</body>
+</html>
